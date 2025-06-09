@@ -44,6 +44,11 @@ const GripVerticalIcon = (props) => (
 const GoogleIcon = () => (
     <svg className="mr-2 -ml-1 w-4 h-4" aria-hidden="true" focusable="false" data-prefix="fab" data-icon="google" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 488 512"><path fill="currentColor" d="M488 261.8C488 403.3 381.5 512 244 512 110.3 512 0 401.8 0 265.5S110.3 19 244 19c70.3 0 126.5 27.8 172.9 69.6L363.7 129.1c-22.5-24.3-53.4-39.8-90.1-39.8-73.8 0-133.2 60.1-133.2 133.8s59.4 133.8 133.2 133.8c76.9 0 119.5-56.6 123.4-86.9H244v-66.2h244z"></path></svg>
 );
+const PencilIcon = (props) => (
+    <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
+    </svg>
+);
 
 
 // --- Reusable UI Components ---
@@ -119,7 +124,6 @@ function App() {
     };
     
     const userId = user.uid;
-
     const tasksCollectionPath = `artifacts/${appId}/users/${userId}/tasks`;
     const q = query(collection(db, tasksCollectionPath), orderBy("order", "asc"));
     
@@ -149,7 +153,6 @@ function App() {
     };
   }, [db, user, isAuthReady, appId]);
 
-  // --- Authentication Functions ---
   const signInWithGoogle = async () => {
     if (!auth) return;
     const provider = new GoogleAuthProvider();
@@ -169,7 +172,6 @@ function App() {
     }
   };
 
-  // --- Core App Functions ---
   const addTask = async (e) => {
     e.preventDefault();
     if (newTask.trim() === '' || !db || !user) return;
@@ -183,12 +185,13 @@ function App() {
     } catch (error) { console.error('Error adding task: ', error); }
   };
   
-  const renameTask = async (taskId, newText) => {
+  const updateTask = async (taskId, newText, newTime) => {
     if (!db || !user) return;
     try {
-        await updateDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks/${taskId}`), { text: newText });
+        const updates = { text: newText, time: newTime || null };
+        await updateDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks/${taskId}`), updates);
     } catch (error) {
-        console.error("Error renaming task:", error);
+        console.error("Error updating task:", error);
     }
   };
 
@@ -255,6 +258,9 @@ function App() {
     );
   }
 
+  const allTasksCompleted = tasks.length > 0 && tasks.every(t => t.completed);
+  const isTodayMarked = completedDays.includes(toYYYYMMDD(new Date()));
+
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans p-4 sm:p-6 lg:p-8">
       <div className="max-w-3xl mx-auto space-y-8">
@@ -268,7 +274,7 @@ function App() {
         <Card>
           <CardHeader>
             <CardTitle>My Schedule</CardTitle>
-            <CardDescription>Double-click to rename. Drag to reorder.</CardDescription>
+            <CardDescription>Click the pencil to edit a task. Drag to reorder.</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={addTask} className="flex flex-col sm:flex-row items-center gap-2 mb-6">
@@ -280,7 +286,7 @@ function App() {
                 <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                     <SortableContext items={tasks.map(t => t.id)} strategy={verticalListSortingStrategy}>
                         {tasks.map((task) => (
-                          <SortableTaskItem key={task.id} task={task} toggleTask={toggleTask} deleteTask={deleteTask} renameTask={renameTask} />
+                          <SortableTaskItem key={task.id} task={task} toggleTask={toggleTask} deleteTask={deleteTask} updateTask={updateTask} />
                         ))}
                     </SortableContext>
                 </DndContext>
@@ -304,35 +310,39 @@ function App() {
   );
 }
 
-// --- Sortable Task Item Component with Renaming ---
-function SortableTaskItem({ task, toggleTask, deleteTask, renameTask }) {
+function SortableTaskItem({ task, toggleTask, deleteTask, updateTask }) {
     const [isEditing, setIsEditing] = useState(false);
     const [editText, setEditText] = useState(task.text);
-    const inputRef = useRef(null);
+    const [editTime, setEditTime] = useState(task.time || '');
+    const textInputRef = useRef(null);
 
     const { attributes, listeners, setNodeRef, transform, transition } = useSortable({id: task.id});
     const style = { transform: CSS.Transform.toString(transform), transition };
 
-    const handleRename = () => {
-        if (editText.trim() && editText.trim() !== task.text) {
-            renameTask(task.id, editText.trim());
+    const handleSave = () => {
+        const textChanged = editText.trim() && editText.trim() !== task.text;
+        const timeChanged = editTime.trim() !== (task.time || '');
+        if (editText.trim() && (textChanged || timeChanged)) {
+            updateTask(task.id, editText.trim(), editTime.trim());
+        } else if (!editText.trim()) {
+            setEditText(task.text); // Revert if new text is empty
         }
         setIsEditing(false);
     };
 
     const handleKeyDown = (e) => {
-        if (e.key === 'Enter') {
-            handleRename();
-        } else if (e.key === 'Escape') {
+        if (e.key === 'Enter') handleSave();
+        else if (e.key === 'Escape') {
             setEditText(task.text);
+            setEditTime(task.time || '');
             setIsEditing(false);
         }
     };
 
     useEffect(() => {
         if (isEditing) {
-            inputRef.current?.focus();
-            inputRef.current?.select();
+            textInputRef.current?.focus();
+            textInputRef.current?.select();
         }
     }, [isEditing]);
 
@@ -342,16 +352,26 @@ function SortableTaskItem({ task, toggleTask, deleteTask, renameTask }) {
                 <GripVerticalIcon />
             </div>
             <Checkbox id={`task-${task.id}`} checked={task.completed} onChange={() => toggleTask(task)} />
-            <div className="ml-3 flex-grow" onDoubleClick={() => { if(!task.completed) setIsEditing(true); }}>
+            <div className="ml-3 flex-grow">
                 {isEditing ? (
-                    <Input
-                        ref={inputRef}
-                        value={editText}
-                        onChange={(e) => setEditText(e.target.value)}
-                        onBlur={handleRename}
-                        onKeyDown={handleKeyDown}
-                        className="h-8 -my-1"
-                    />
+                    <div className="flex items-center gap-2">
+                        <Input
+                            ref={textInputRef}
+                            value={editText}
+                            onChange={(e) => setEditText(e.target.value)}
+                            onBlur={handleSave}
+                            onKeyDown={handleKeyDown}
+                            className="h-8 -my-1"
+                        />
+                        <Input
+                            value={editTime}
+                            placeholder="Time"
+                            onChange={(e) => setEditTime(e.target.value)}
+                            onBlur={handleSave}
+                            onKeyDown={handleKeyDown}
+                            className="h-8 -my-1 w-28"
+                        />
+                    </div>
                 ) : (
                     <div className="py-1 cursor-pointer" onClick={() => toggleTask(task)}>
                         <label htmlFor={`task-${task.id}`} className={`font-medium ${task.completed ? 'line-through text-gray-500 dark:text-gray-400' : 'text-gray-800 dark:text-gray-200'}`}>{task.text}</label>
@@ -359,12 +379,16 @@ function SortableTaskItem({ task, toggleTask, deleteTask, renameTask }) {
                     </div>
                 )}
             </div>
-            <Button variant="ghost" size="icon" onClick={() => deleteTask(task.id)} className="text-gray-500 hover:text-red-500 dark:text-gray-400 dark:hover:text-red-400"><TrashIcon className="h-4 w-4" /></Button>
+            <Button variant="ghost" size="icon" onClick={() => { if (!task.completed) setIsEditing(true); }} className="text-gray-500 hover:text-blue-500 dark:text-gray-400 dark:hover:text-blue-400" aria-label="Edit task">
+                <PencilIcon className="h-4 w-4" />
+            </Button>
+            <Button variant="ghost" size="icon" onClick={() => deleteTask(task.id)} className="text-gray-500 hover:text-red-500 dark:text-gray-400 dark:hover:text-red-400" aria-label="Delete task">
+                <TrashIcon className="h-4 w-4" />
+            </Button>
         </div>
     );
 }
 
-// --- Calendar View Component ---
 const CalendarView = ({ currentDate, setCurrentDate, completedDays, toYYYYMMDD }) => {
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth();

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { 
   getFirestore, 
   collection, 
@@ -41,6 +41,9 @@ const GripVerticalIcon = (props) => (
         <circle cx="9" cy="12" r="1" /><circle cx="9" cy="5" r="1" /><circle cx="9" cy="19" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="15" cy="5" r="1" /><circle cx="15" cy="19" r="1" />
     </svg>
 );
+const GoogleIcon = () => (
+    <svg className="mr-2 -ml-1 w-4 h-4" aria-hidden="true" focusable="false" data-prefix="fab" data-icon="google" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 488 512"><path fill="currentColor" d="M488 261.8C488 403.3 381.5 512 244 512 110.3 512 0 401.8 0 265.5S110.3 19 244 19c70.3 0 126.5 27.8 172.9 69.6L363.7 129.1c-22.5-24.3-53.4-39.8-90.1-39.8-73.8 0-133.2 60.1-133.2 133.8s59.4 133.8 133.2 133.8c76.9 0 119.5-56.6 123.4-86.9H244v-66.2h244z"></path></svg>
+);
 
 
 // --- Reusable UI Components ---
@@ -69,9 +72,12 @@ function App() {
   const [completedDays, setCompletedDays] = useState([]);
   const [currentDate, setCurrentDate] = useState(new Date());
   
+  // **MODIFIED**: State for Firebase and the currently logged-in user
   const [db, setDb] = useState(null);
-  const [userId, setUserId] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [user, setUser] = useState(null); 
   const [isAuthReady, setIsAuthReady] = useState(false);
+  
   const newTaskInputRef = useRef(null);
   const appId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
 
@@ -82,6 +88,7 @@ function App() {
     return `${year}-${month}-${day}`;
   };
 
+  // **MODIFIED**: Initialize Firebase and listen for auth state changes
   useEffect(() => {
     const firebaseConfig = {
       apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -98,33 +105,32 @@ function App() {
     const firestore = getFirestore(app);
     const authInstance = getAuth(app);
     setDb(firestore);
+    setAuth(authInstance);
 
-    onAuthStateChanged(authInstance, user => {
-      if (user) {
-        setUserId(user.uid);
-      } else {
-        signInAnonymously(authInstance).catch(error => console.error("Anonymous sign-in failed:", error));
-      }
+    onAuthStateChanged(authInstance, (currentUser) => {
+      setUser(currentUser); // Set user to null if logged out, or user object if logged in
       setIsAuthReady(true);
     });
   }, []);
 
+  // **MODIFIED**: Data fetching now depends on a valid user being logged in
   useEffect(() => {
-    if (!isAuthReady || !db || !userId) return;
-
-    // ... daily reset logic remains the same ...
+    if (!isAuthReady || !db || !user) {
+      setTasks([]); // Clear tasks if user logs out
+      setCompletedDays([]);
+      return;
+    };
+    
+    const userId = user.uid;
 
     const tasksCollectionPath = `artifacts/${appId}/users/${userId}/tasks`;
     const q = query(collection(db, tasksCollectionPath), orderBy("order", "asc"));
     
     const unsubscribeTasks = onSnapshot(q, snapshot => {
         let fetchedTasks = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-
-        // **NEW**: Automatically update old tasks that don't have an 'order' field.
         const tasksWithoutOrder = fetchedTasks.filter(t => t.order === undefined);
         if (tasksWithoutOrder.length > 0) {
             const batch = writeBatch(db);
-            // Sort by creation date to give them a default order
             const sorted = fetchedTasks.sort((a,b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
             sorted.forEach((task, index) => {
                 const docRef = doc(db, tasksCollectionPath, task.id);
@@ -132,7 +138,6 @@ function App() {
             });
             batch.commit();
         }
-
         setTasks(fetchedTasks);
     });
 
@@ -145,14 +150,36 @@ function App() {
       unsubscribeTasks();
       unsubscribeDays();
     };
-  }, [db, userId, isAuthReady, appId]);
+  }, [db, user, isAuthReady, appId]);
 
+  // --- Authentication Functions ---
+  const signInWithGoogle = async () => {
+    if (!auth) return;
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Error signing in with Google:", error);
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (!auth) return;
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error("Error signing out:", error);
+    }
+  };
+
+
+  // --- Core App Functions (depend on user.uid) ---
   const addTask = async (e) => {
     e.preventDefault();
-    if (newTask.trim() === '' || !db) return;
+    if (newTask.trim() === '' || !db || !user) return;
     try {
       const newOrder = tasks.length > 0 ? Math.max(...tasks.map(t => t.order || 0)) + 1 : 0;
-      await addDoc(collection(db, `artifacts/${appId}/users/${userId}/tasks`), {
+      await addDoc(collection(db, `artifacts/${appId}/users/${user.uid}/tasks`), {
         text: newTask, time: newTaskTime, completed: false, createdAt: new Date(), order: newOrder
       });
       setNewTask('');
@@ -161,21 +188,17 @@ function App() {
   };
 
   const toggleTask = async (task) => {
-    if (!db) return;
-    try { await updateDoc(doc(db, `artifacts/${appId}/users/${userId}/tasks/${task.id}`), { completed: !task.completed }); }
+    if (!db || !user) return;
+    try { await updateDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks/${task.id}`), { completed: !task.completed }); }
     catch (error) { console.error("Error toggling task:", error); }
   };
 
   const deleteTask = async (taskId) => {
-    if (!db) return;
-    try { await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/tasks/${taskId}`)); }
+    if (!db || !user) return;
+    try { await deleteDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks/${taskId}`)); }
     catch (error) { console.error("Error deleting task:", error); }
   };
-
-  const handleFollowedSchedule = async () => { /* ... (remains the same) ... */ };
   
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-
   const handleDragEnd = (event) => {
     const {active, over} = event;
     if (active.id !== over.id) {
@@ -183,61 +206,63 @@ function App() {
         const oldIndex = currentTasks.findIndex(item => item.id === active.id);
         const newIndex = currentTasks.findIndex(item => item.id === over.id);
         const newItems = arrayMove(currentTasks, oldIndex, newIndex);
-
-        const batch = writeBatch(db);
-        newItems.forEach((item, index) => {
-          const docRef = doc(db, `artifacts/${appId}/users/${userId}/tasks/${item.id}`);
-          batch.update(docRef, { order: index });
-        });
-        batch.commit().catch(err => console.error("Failed to update order:", err));
-        
+        if (db && user) {
+            const batch = writeBatch(db);
+            newItems.forEach((item, index) => {
+              const docRef = doc(db, `artifacts/${appId}/users/${user.uid}/tasks/${item.id}`);
+              batch.update(docRef, { order: index });
+            });
+            batch.commit().catch(err => console.error("Failed to update order:", err));
+        }
         return newItems;
       });
     }
   };
 
+  const handleFollowedSchedule = async () => { /* ... (remains the same but uses user.uid) ... */ };
+  
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const allTasksCompleted = tasks.length > 0 && tasks.every(t => t.completed);
   const isTodayMarked = completedDays.includes(toYYYYMMDD(new Date()));
 
-  // --- Calendar View Component ---
-  const CalendarView = () => {
-    const year = currentDate.getFullYear();
-    const month = currentDate.getMonth();
-    const monthName = currentDate.toLocaleString('default', { month: 'long' });
-    const firstDayOfMonth = new Date(year, month, 1).getDay();
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const daysArray = Array.from({ length: firstDayOfMonth }).map(() => null).concat(Array.from({ length: daysInMonth }, (_, i) => i + 1));
-    const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const changeMonth = (offset) => setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
-
+  // --- Conditional Rendering ---
+  if (!isAuthReady) {
+    return <div className="min-h-screen bg-gray-50 flex items-center justify-center">Loading...</div>;
+  }
+  
+  if (!user) {
     return (
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <Button onClick={() => changeMonth(-1)} variant="ghost" size="icon" aria-label="Previous month"><ChevronLeftIcon className="h-5 w-5" /></Button>
-          <h3 className="text-lg font-semibold">{monthName} {year}</h3>
-          <Button onClick={() => changeMonth(1)} variant="ghost" size="icon" aria-label="Next month"><ChevronRightIcon className="h-5 w-5" /></Button>
+        <div className="min-h-screen bg-gray-50 dark:bg-gray-950 flex flex-col items-center justify-center p-4">
+            <Card className="w-full max-w-sm">
+                <CardHeader>
+                    <CardTitle className="text-center">Welcome to My Schedule</CardTitle>
+                    <CardDescription className="text-center">Sign in to sync your schedule across all devices.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <Button onClick={signInWithGoogle} className="w-full">
+                        <GoogleIcon /> Sign in with Google
+                    </Button>
+                </CardContent>
+            </Card>
         </div>
-        <div className="grid grid-cols-7 gap-2 text-center text-sm">
-          {weekdays.map(day => <div key={day} className="font-medium text-gray-500 dark:text-gray-400">{day}</div>)}
-          {daysArray.map((day, index) => {
-            const dateStr = day ? toYYYYMMDD(new Date(year, month, day)) : '';
-            const isCompleted = completedDays.includes(dateStr);
-            const isToday = dateStr === toYYYYMMDD(new Date());
-            return <div key={index} className={`w-10 h-10 flex items-center justify-center rounded-full ${isCompleted ? 'bg-green-500 text-white font-bold' : ''} ${isToday && !isCompleted ? 'bg-gray-200 dark:bg-gray-700' : ''}`}>{day}</div>;
-          })}
-        </div>
-      </div>
     );
-  };
+  }
 
+  // --- Main App View (Logged In) ---
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans p-4 sm:p-6 lg:p-8">
       <div className="max-w-3xl mx-auto space-y-8">
+        <div className="flex justify-between items-center">
+            <div className="flex items-center gap-2">
+                <img src={user.photoURL} alt="User" className="w-8 h-8 rounded-full" />
+                <span className="text-sm font-medium">{user.displayName}</span>
+            </div>
+            <Button onClick={handleSignOut} variant="ghost" size="default">Sign Out</Button>
+        </div>
         <Card>
           <CardHeader>
             <CardTitle>My Schedule</CardTitle>
             <CardDescription>Drag and drop tasks to reorder them.</CardDescription>
-            {userId && <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">User ID: {userId}</p>}
           </CardHeader>
           <CardContent>
             <form onSubmit={addTask} className="flex flex-col sm:flex-row items-center gap-2 mb-6">
@@ -263,7 +288,7 @@ function App() {
             <CardTitle>Progress Tracker</CardTitle>
             <CardDescription>Record the days you successfully follow your schedule.</CardDescription>
           </CardHeader>
-          <CardContent><CalendarView /></CardContent>
+          <CardContent><CalendarView currentDate={currentDate} setCurrentDate={setCurrentDate} completedDays={completedDays} toYYYYMMDD={toYYYYMMDD} /></CardContent>
           <CardFooter className="text-center">
             <Button onClick={handleFollowedSchedule} disabled={!allTasksCompleted || isTodayMarked} className="w-full">{isTodayMarked ? "Today's Progress Saved!" : "I Followed My Schedule Today"}</Button>
           </CardFooter>
@@ -292,5 +317,36 @@ function SortableTaskItem({ task, toggleTask, deleteTask }) {
         </div>
     );
 }
+
+// --- Calendar View Component ---
+const CalendarView = ({ currentDate, setCurrentDate, completedDays, toYYYYMMDD }) => {
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth();
+    const monthName = currentDate.toLocaleString('default', { month: 'long' });
+    const firstDayOfMonth = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const daysArray = Array.from({ length: firstDayOfMonth }).map(() => null).concat(Array.from({ length: daysInMonth }, (_, i) => i + 1));
+    const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const changeMonth = (offset) => setCurrentDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <Button onClick={() => changeMonth(-1)} variant="ghost" size="icon" aria-label="Previous month"><ChevronLeftIcon className="h-5 w-5" /></Button>
+          <h3 className="text-lg font-semibold">{monthName} {year}</h3>
+          <Button onClick={() => changeMonth(1)} variant="ghost" size="icon" aria-label="Next month"><ChevronRightIcon className="h-5 w-5" /></Button>
+        </div>
+        <div className="grid grid-cols-7 gap-2 text-center text-sm">
+          {weekdays.map(day => <div key={day} className="font-medium text-gray-500 dark:text-gray-400">{day}</div>)}
+          {daysArray.map((day, index) => {
+            const dateStr = day ? toYYYYMMDD(new Date(year, month, day)) : '';
+            const isCompleted = completedDays.includes(dateStr);
+            const isToday = dateStr === toYYYYMMDD(new Date());
+            return <div key={index} className={`w-10 h-10 flex items-center justify-center rounded-full ${isCompleted ? 'bg-green-500 text-white font-bold' : ''} ${isToday && !isCompleted ? 'bg-gray-200 dark:bg-gray-700' : ''}`}>{day}</div>;
+          })}
+        </div>
+      </div>
+    );
+  };
 
 export default App;

@@ -72,7 +72,6 @@ function App() {
   const [completedDays, setCompletedDays] = useState([]);
   const [currentDate, setCurrentDate] = useState(new Date());
   
-  // **MODIFIED**: State for Firebase and the currently logged-in user
   const [db, setDb] = useState(null);
   const [auth, setAuth] = useState(null);
   const [user, setUser] = useState(null); 
@@ -88,7 +87,6 @@ function App() {
     return `${year}-${month}-${day}`;
   };
 
-  // **MODIFIED**: Initialize Firebase and listen for auth state changes
   useEffect(() => {
     const firebaseConfig = {
       apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -108,15 +106,14 @@ function App() {
     setAuth(authInstance);
 
     onAuthStateChanged(authInstance, (currentUser) => {
-      setUser(currentUser); // Set user to null if logged out, or user object if logged in
+      setUser(currentUser);
       setIsAuthReady(true);
     });
   }, []);
 
-  // **MODIFIED**: Data fetching now depends on a valid user being logged in
   useEffect(() => {
     if (!isAuthReady || !db || !user) {
-      setTasks([]); // Clear tasks if user logs out
+      setTasks([]);
       setCompletedDays([]);
       return;
     };
@@ -172,8 +169,7 @@ function App() {
     }
   };
 
-
-  // --- Core App Functions (depend on user.uid) ---
+  // --- Core App Functions ---
   const addTask = async (e) => {
     e.preventDefault();
     if (newTask.trim() === '' || !db || !user) return;
@@ -186,19 +182,37 @@ function App() {
       setNewTaskTime('');
     } catch (error) { console.error('Error adding task: ', error); }
   };
+  
+  const renameTask = async (taskId, newText) => {
+    if (!db || !user) return;
+    try {
+        await updateDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks/${taskId}`), { text: newText });
+    } catch (error) {
+        console.error("Error renaming task:", error);
+    }
+  };
 
   const toggleTask = async (task) => {
     if (!db || !user) return;
     try { await updateDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks/${task.id}`), { completed: !task.completed }); }
     catch (error) { console.error("Error toggling task:", error); }
   };
-
+  
   const deleteTask = async (taskId) => {
     if (!db || !user) return;
     try { await deleteDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks/${taskId}`)); }
     catch (error) { console.error("Error deleting task:", error); }
   };
   
+  const handleFollowedSchedule = async () => {
+    if (!db || !user) return;
+    const todayStr = toYYYYMMDD(new Date());
+    try { await setDoc(doc(db, `artifacts/${appId}/users/${user.uid}/completedDays/${todayStr}`), { completedAt: new Date() }); }
+    catch (error) { console.error("Error marking day as completed: ", error); }
+  };
+  
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
   const handleDragEnd = (event) => {
     const {active, over} = event;
     if (active.id !== over.id) {
@@ -218,14 +232,7 @@ function App() {
       });
     }
   };
-
-  const handleFollowedSchedule = async () => { /* ... (remains the same but uses user.uid) ... */ };
   
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-  const allTasksCompleted = tasks.length > 0 && tasks.every(t => t.completed);
-  const isTodayMarked = completedDays.includes(toYYYYMMDD(new Date()));
-
-  // --- Conditional Rendering ---
   if (!isAuthReady) {
     return <div className="min-h-screen bg-gray-50 flex items-center justify-center">Loading...</div>;
   }
@@ -248,7 +255,6 @@ function App() {
     );
   }
 
-  // --- Main App View (Logged In) ---
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans p-4 sm:p-6 lg:p-8">
       <div className="max-w-3xl mx-auto space-y-8">
@@ -262,7 +268,7 @@ function App() {
         <Card>
           <CardHeader>
             <CardTitle>My Schedule</CardTitle>
-            <CardDescription>Drag and drop tasks to reorder them.</CardDescription>
+            <CardDescription>Double-click to rename. Drag to reorder.</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={addTask} className="flex flex-col sm:flex-row items-center gap-2 mb-6">
@@ -274,7 +280,7 @@ function App() {
                 <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                     <SortableContext items={tasks.map(t => t.id)} strategy={verticalListSortingStrategy}>
                         {tasks.map((task) => (
-                          <SortableTaskItem key={task.id} task={task} toggleTask={toggleTask} deleteTask={deleteTask} />
+                          <SortableTaskItem key={task.id} task={task} toggleTask={toggleTask} deleteTask={deleteTask} renameTask={renameTask} />
                         ))}
                     </SortableContext>
                 </DndContext>
@@ -284,13 +290,13 @@ function App() {
         </Card>
         
         <Card>
-          <CardHeader>
+           <CardHeader>
             <CardTitle>Progress Tracker</CardTitle>
             <CardDescription>Record the days you successfully follow your schedule.</CardDescription>
           </CardHeader>
           <CardContent><CalendarView currentDate={currentDate} setCurrentDate={setCurrentDate} completedDays={completedDays} toYYYYMMDD={toYYYYMMDD} /></CardContent>
           <CardFooter className="text-center">
-            <Button onClick={handleFollowedSchedule} disabled={!allTasksCompleted || isTodayMarked} className="w-full">{isTodayMarked ? "Today's Progress Saved!" : "I Followed My Schedule Today"}</Button>
+            <Button onClick={handleFollowedSchedule} disabled={!tasks.length || !tasks.every(t => t.completed) || completedDays.includes(toYYYYMMDD(new Date()))} className="w-full">{completedDays.includes(toYYYYMMDD(new Date())) ? "Today's Progress Saved!" : "I Followed My Schedule Today"}</Button>
           </CardFooter>
         </Card>
       </div>
@@ -298,20 +304,60 @@ function App() {
   );
 }
 
-// --- Sortable Task Item Component ---
-function SortableTaskItem({ task, toggleTask, deleteTask }) {
+// --- Sortable Task Item Component with Renaming ---
+function SortableTaskItem({ task, toggleTask, deleteTask, renameTask }) {
+    const [isEditing, setIsEditing] = useState(false);
+    const [editText, setEditText] = useState(task.text);
+    const inputRef = useRef(null);
+
     const { attributes, listeners, setNodeRef, transform, transition } = useSortable({id: task.id});
     const style = { transform: CSS.Transform.toString(transform), transition };
-    
+
+    const handleRename = () => {
+        if (editText.trim() && editText.trim() !== task.text) {
+            renameTask(task.id, editText.trim());
+        }
+        setIsEditing(false);
+    };
+
+    const handleKeyDown = (e) => {
+        if (e.key === 'Enter') {
+            handleRename();
+        } else if (e.key === 'Escape') {
+            setEditText(task.text);
+            setIsEditing(false);
+        }
+    };
+
+    useEffect(() => {
+        if (isEditing) {
+            inputRef.current?.focus();
+            inputRef.current?.select();
+        }
+    }, [isEditing]);
+
     return (
         <div ref={setNodeRef} style={style} {...attributes} className="flex items-center p-3 rounded-lg bg-gray-100 dark:bg-gray-900 shadow-sm">
             <div {...listeners} className="cursor-grab p-2">
                 <GripVerticalIcon />
             </div>
             <Checkbox id={`task-${task.id}`} checked={task.completed} onChange={() => toggleTask(task)} />
-            <div className="ml-3 flex-grow cursor-pointer" onClick={() => toggleTask(task)}>
-              <label htmlFor={`task-${task.id}`} className={`font-medium ${task.completed ? 'line-through text-gray-500 dark:text-gray-400' : 'text-gray-800 dark:text-gray-200'}`}>{task.text}</label>
-              {task.time && <p className="text-xs text-gray-500 dark:text-gray-400">{task.time}</p>}
+            <div className="ml-3 flex-grow" onDoubleClick={() => { if(!task.completed) setIsEditing(true); }}>
+                {isEditing ? (
+                    <Input
+                        ref={inputRef}
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        onBlur={handleRename}
+                        onKeyDown={handleKeyDown}
+                        className="h-8 -my-1"
+                    />
+                ) : (
+                    <div className="py-1 cursor-pointer" onClick={() => toggleTask(task)}>
+                        <label htmlFor={`task-${task.id}`} className={`font-medium ${task.completed ? 'line-through text-gray-500 dark:text-gray-400' : 'text-gray-800 dark:text-gray-200'}`}>{task.text}</label>
+                        {task.time && <p className="text-xs text-gray-500 dark:text-gray-400">{task.time}</p>}
+                    </div>
+                )}
             </div>
             <Button variant="ghost" size="icon" onClick={() => deleteTask(task.id)} className="text-gray-500 hover:text-red-500 dark:text-gray-400 dark:hover:text-red-400"><TrashIcon className="h-4 w-4" /></Button>
         </div>
@@ -347,6 +393,7 @@ const CalendarView = ({ currentDate, setCurrentDate, completedDays, toYYYYMMDD }
         </div>
       </div>
     );
-  };
+};
+
 
 export default App;
